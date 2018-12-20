@@ -12,7 +12,7 @@ template<typename F>
 inline void
 process_fastq(std::string filename, F&& callback)
 {
-    sys::file_descriptor fd("/home/mkerbiri/data/ERR550495.fastq");
+    sys::file_descriptor fd(filename);
     auto data = fd.mmap<const char>();
     // FIXME: those are optional but we really want to knwow if they work for testing
     assert(data.advise_hugepage());
@@ -42,5 +42,8 @@ main(int argc, char** argv)
 {
     if (argc < 2)
         return 1;
-    process_fastq(argv[1], [](fastq_record<>& rec) { cout << "\"" << rec.sequence() << "\"\n"; });
+    process_fastq(argv[1], [](fastq_record<>& rec) { 
+		    use(rec);
+		    clobber();
+		  });
 }
