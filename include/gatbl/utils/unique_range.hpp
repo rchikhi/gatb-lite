@@ -6,8 +6,6 @@
 
 namespace gatbl {
 
-
-
 template<typename T, typename D = std::default_delete<T[]>>
 struct unique_range
 {
@@ -21,20 +19,26 @@ struct unique_range
 
     constexpr unique_range() = default;
 
-    template<typename _D=D>
-    unique_range(T* ptr, size_t size, _D&& d=D{}) noexcept : _ptr(ptr, std::forward<D>(d)), _size(size) {}
+    template<typename _D = D>
+    unique_range(T* ptr, size_t size, _D&& d = D{}) noexcept
+      : _ptr(ptr, std::forward<D>(d))
+      , _size(size)
+    {}
     unique_range(const unique_range&) = delete;
-    unique_range(unique_range&& from) noexcept : unique_range() {
+    unique_range(unique_range&& from) noexcept
+      : unique_range()
+    {
         std::swap(from._ptr, _ptr);
         std::swap(from._size, _size);
     }
     unique_range& operator=(const unique_range&) = delete;
-    unique_range& operator=(unique_range&& from) noexcept {
+    unique_range& operator=(unique_range&& from) noexcept
+    {
         reset();
         std::swap(from._ptr, _ptr);
         std::swap(from._size, _size);
+        return *this;
     }
-
 
     size_t size() const noexcept { return _ptr.value() ? _size : 0; }
     bool empty() const noexcept { return _ptr.value() && _size; }
@@ -56,8 +60,9 @@ struct unique_range
         return *(begin() + i);
     }
 
-    void reset(std::nullptr_t=nullptr) {
-        if(!empty()) {
+    void reset(std::nullptr_t = nullptr)
+    {
+        if (!empty()) {
             destruct(_ptr.tag());
         }
         _ptr = nullptr;
@@ -65,17 +70,16 @@ struct unique_range
     }
 
   protected:
+    // FIXME: would like to enable this for default_delete<T[]>
+    //    auto destruct(D& d) -> decltype(d(this->begin()))
+    //    {
+    //        utils::empty_base<T*, D> ptr = { nullptr, {} };
+    //        std::swap(_ptr, ptr);
+    //        _size = 0;
+    //        return ptr.tag()(ptr.value());
+    //    }
 
-    //FIXME: would like to enable this for default_delete<T[]>
-//    auto destruct(D& d) -> decltype(d(this->begin()))
-//    {
-//        utils::empty_base<T*, D> ptr = { nullptr, {} };
-//        std::swap(_ptr, ptr);
-//        _size = 0;
-//        return ptr.tag()(ptr.value());
-//    }
-
-    void destruct(D& d/*, std::nullptr_t = nullptr*/) //-> decltype(d(this->begin(), this->size()))
+    void destruct(D& d /*, std::nullptr_t = nullptr*/) //-> decltype(d(this->begin(), this->size()))
     {
         utils::empty_base<T*, D> ptr = { nullptr, {} };
         std::swap(_ptr, ptr);
@@ -88,6 +92,6 @@ struct unique_range
     size_t _size = 0;
 };
 
-}  // namespace gatbl
+} // namespace gatbl
 
 #endif // UNIQUE_RANGE_HPP
