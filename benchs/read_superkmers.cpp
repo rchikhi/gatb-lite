@@ -27,7 +27,8 @@ process_fastq(std::string filename, F&& callback)
 
 using namespace std;
 
-typedef vector<shared_ptr<vector<string>>> read_packets_t ;
+typedef shared_ptr<vector<string>> read_packet_t ;
+typedef vector<read_packet_t> read_packets_t ;
 typedef uint64_t kmer_type;
 
 inline static char char_to_nt(char c)
@@ -111,7 +112,7 @@ void compute_minimizer(uint64_t kmer, uint32_t &minimizer, unsigned int& minimiz
     }
 }
 
-void chop_read_into_kmers(string& read, std::atomic<unsigned int> &nb_kmers, vector<uint32_t> &_mmer_lut, unsigned int k, unsigned int _minimizerSize, vector<int> &superkmer_positions)
+void chop_read_into_kmers(string& read, vector<uint32_t> &_mmer_lut, unsigned int k, unsigned int _minimizerSize, vector<int> &superkmer_positions, vector<unsigned int> &nb_kmers_thread, int thread_id)
 {
     kmer_type kmer = 0, kmer_rc = 0;
     kmer_type kmerMask = (1LL << (k*2)) - 1;
@@ -128,7 +129,7 @@ void chop_read_into_kmers(string& read, std::atomic<unsigned int> &nb_kmers, vec
         kmer_rc = (kmer>>2) + (c^2);
     }
     emit_kmer(std::min(kmer,kmer_rc));
-    nb_kmers++;
+    nb_kmers_thread[thread_id]++;
     compute_minimizer(kmer, minimizer, minimizer_position, k, _mmer_lut, _minimizerSize);
 
     size_t read_size = read.size();
@@ -138,7 +139,7 @@ void chop_read_into_kmers(string& read, std::atomic<unsigned int> &nb_kmers, vec
         kmer    = (( kmer << 2) +  c) & kmerMask;
         kmer_rc = (( kmer >> 2) +  (c^2)) & kmerMask;
         emit_kmer(std::min(kmer,kmer_rc));
-        nb_kmers++;
+        nb_kmers_thread[thread_id]++;
 
         mmer    = _mmer_lut[kmer & mmerMask];
         minimizer_position--;
@@ -164,7 +165,7 @@ void chop_read_into_kmers(string& read, std::atomic<unsigned int> &nb_kmers, vec
     }
 }
 
-void emit_superkmers(string &read, vector<int> &superkmer_positions, int k, std::atomic<unsigned int> &nb_superkmers)
+void emit_superkmers(string &read, vector<int> &superkmer_positions, int k, vector<unsigned int> &nb_superkmers_thread, int thread_id)
 {
     // do what we want with that kmer
     //std::cout << kmer << std::endl;
@@ -189,7 +190,7 @@ void emit_superkmers(string &read, vector<int> &superkmer_positions, int k, std:
         if (i == next_break)
         {
             use(superkmer); // emit the superkmer here
-            nb_superkmers++;
+            nb_superkmers_thread[thread_id]++;
 
             next_break_i++;
             next_break = superkmer_positions[next_break_i];
@@ -198,27 +199,22 @@ void emit_superkmers(string &read, vector<int> &superkmer_positions, int k, std:
     }
     
     use(superkmer); // emit the last superkmer
-    nb_superkmers++;
+    nb_superkmers_thread[thread_id]++;
 }
 
 
-void reads_to_superkmer(read_packets_t &read_packets, std::atomic<unsigned int> &nb_kmers, std::atomic<unsigned int> &nb_superkmers, 
-        vector<uint32_t> &_mmer_lut, unsigned int k, unsigned int _minimizerSize, std::mutex& lock, int thread_id)
+void reads_to_superkmer(read_packet_t read_packet, 
+        vector<uint32_t> _mmer_lut, unsigned int k, unsigned int _minimizerSize, int thread_id,
+        vector<unsigned int> &nb_kmers_thread, vector<unsigned int> &nb_superkmers_thread)
 {
-    // critical section
-    lock.lock();
-    auto read_packet = std::move(read_packets.back());
-    read_packets.pop_back();
-    lock.unlock();
-
     for (auto read: *read_packet)
     {
         if (read.size() < k) continue;
 
         //std::cout << read << std::endl;
         vector<int> superkmer_positions;
-        chop_read_into_kmers(read, nb_kmers, _mmer_lut, k, _minimizerSize, superkmer_positions);
-        emit_superkmers(read, superkmer_positions, k, nb_superkmers);
+        chop_read_into_kmers(read, _mmer_lut, k, _minimizerSize, superkmer_positions, nb_kmers_thread, thread_id);
+        emit_superkmers(read, superkmer_positions, k, nb_superkmers_thread, thread_id);
     }
     
     read_packet.reset(); 
@@ -236,34 +232,37 @@ main(int argc, char** argv)
 
     ThreadPool pool(nb_threads);
     shared_ptr<vector<string>> read_packet = make_shared<vector<string>>();
-    read_packets_t read_packets;
-    std::mutex lock;
-    std::atomic<unsigned int> nb_kmers, nb_superkmers;
+    vector<unsigned int> nb_kmers_thread(nb_threads), nb_superkmers_thread(nb_threads);
+    uint64_t nb_kmers = 0, nb_superkmers = 0;
     uint32_t nbminims_total = (1 << (2*_minimizerSize));
     vector<uint32_t> _mmer_lut(nbminims_total); 
     init_minimizers(_minimizerSize, _mmer_lut);
 
-    process_fastq(argv[1], [&read_packets, &read_packet, &pool, &lock, &nb_kmers, &nb_superkmers, &_mmer_lut, k, _minimizerSize](fastq_record<>& rec) { 
+    for (int i = 0; i < nb_threads; i++)
+    { nb_kmers_thread[i] = 0; nb_superkmers_thread[i] = 0;}
+
+    process_fastq(argv[1], [&read_packet, &pool, &nb_kmers_thread, &nb_superkmers_thread, &_mmer_lut, k, _minimizerSize](fastq_record<>& rec) { 
 
             string&& read_str = string(rec.sequence().begin(),rec.sequence().end());
             read_packet->push_back(std::move(read_str));
 
-            if (read_packet->size() == 10000)
+            if (read_packet->size() == 100000)
             {
-               auto r_t_s_wrapper = [&read_packets, &lock, &nb_kmers, &nb_superkmers, &_mmer_lut, k, _minimizerSize] (int thread_id) 
-               { reads_to_superkmer(read_packets, nb_kmers, nb_superkmers, _mmer_lut, k, _minimizerSize, lock, thread_id);};
+               auto r_t_s_wrapper = [read_packet, &nb_kmers_thread, &nb_superkmers_thread, _mmer_lut, k, _minimizerSize] (int thread_id) 
+               { reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, thread_id, nb_kmers_thread, nb_superkmers_thread);};
 
-               lock.lock();
-               read_packets.push_back(std::move(read_packet));
-               lock.unlock();
-
-               read_packet = make_shared<vector<string>>();
                
                pool.enqueue(r_t_s_wrapper);
                //r_t_s_wrapper(0); // single threaded
+               
+               read_packet = make_shared<vector<string>>();
             }
 		  });
     pool.join();
+
+    for (int i = 0; i < nb_threads; i++)
+    { nb_kmers += nb_kmers_thread[i] ; nb_superkmers += nb_superkmers_thread[i];}
+
     std::cout << "nb kmers:      " << nb_kmers      << std::endl;
     std::cout << "nb superkmers: " << nb_superkmers << std::endl;
 }
