@@ -6,8 +6,8 @@
 #include "gatbl/sys/file.hpp"
 #include "gatbl/fastx.hpp"
 
-// superkmer-specific stuff
 #include "ThreadPool.h"
+//#include "thread_pool.hpp" // other thread pool we're not using
 
 using namespace gatbl;
 
@@ -235,8 +235,11 @@ main(int argc, char** argv)
     int k = 25;
 
     ThreadPool pool(nb_threads);
+    //tp::ThreadPool *pool(new tp::ThreadPool);
+
     shared_ptr<vector<string>> read_packet = make_shared<vector<string>>();
-    read_packet->reserve(100000);
+    int read_packet_size = 1000000;
+    read_packet->reserve(read_packet_size);
     vector<unsigned int> nb_kmers_thread(nb_threads), nb_superkmers_thread(nb_threads);
     uint64_t nb_kmers = 0, nb_superkmers = 0;
     uint32_t nbminims_total = (1 << (2*_minimizerSize));
@@ -246,27 +249,33 @@ main(int argc, char** argv)
     for (int i = 0; i < nb_threads; i++)
     { nb_kmers_thread[i] = 0; nb_superkmers_thread[i] = 0;}
 
-    process_fastq(argv[1], [&read_packet, &pool, &nb_kmers_thread, &nb_superkmers_thread, &_mmer_lut, &k, &_minimizerSize, &nb_threads](fastq_record<>& rec) { 
+    process_fastq(argv[1], [&read_packet, &read_packet_size, &pool, &nb_kmers_thread, &nb_superkmers_thread, &_mmer_lut, &k, &_minimizerSize, &nb_threads](fastq_record<>& rec) { 
 
             string&& read_str = string(rec.sequence().begin(),rec.sequence().end());
             read_packet->push_back(std::move(read_str));
 
-            if (read_packet->size() == 100000)
+            if (read_packet->size() == read_packet_size)
             {
                auto r_t_s_wrapper = [read_packet, &nb_kmers_thread, &nb_superkmers_thread, _mmer_lut, &k, &_minimizerSize] (int thread_id) 
                { reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, thread_id, nb_kmers_thread, nb_superkmers_thread);};
 
+               auto r_t_s_wrapper_4_other_thread_pool= [read_packet, &nb_kmers_thread, &nb_superkmers_thread, _mmer_lut, &k, &_minimizerSize] () 
+               { reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, 0, nb_kmers_thread, nb_superkmers_thread);};
               
-               if (nb_threads > 1) 
+               if (nb_threads > 1)
+               {
                 pool.enqueue(r_t_s_wrapper);
+                //pool->post(r_t_s_wrapper_4_other_thread_pool);
+               }
                else
                 r_t_s_wrapper(0); // single threaded
                
                read_packet = make_shared<vector<string>>();
-               read_packet->reserve(100000);
+               read_packet->reserve(read_packet_size);
             }
 		  });
     pool.join();
+    //delete pool;
     
     // process the last block
     reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, 0, nb_kmers_thread, nb_superkmers_thread);
