@@ -246,25 +246,30 @@ main(int argc, char** argv)
     for (int i = 0; i < nb_threads; i++)
     { nb_kmers_thread[i] = 0; nb_superkmers_thread[i] = 0;}
 
-    process_fastq(argv[1], [&read_packet, &pool, &nb_kmers_thread, &nb_superkmers_thread, &_mmer_lut, k, _minimizerSize](fastq_record<>& rec) { 
+    process_fastq(argv[1], [&read_packet, &pool, &nb_kmers_thread, &nb_superkmers_thread, &_mmer_lut, &k, &_minimizerSize, &nb_threads](fastq_record<>& rec) { 
 
             string&& read_str = string(rec.sequence().begin(),rec.sequence().end());
             read_packet->push_back(std::move(read_str));
 
             if (read_packet->size() == 100000)
             {
-               auto r_t_s_wrapper = [read_packet, &nb_kmers_thread, &nb_superkmers_thread, _mmer_lut, k, _minimizerSize] (int thread_id) 
+               auto r_t_s_wrapper = [read_packet, &nb_kmers_thread, &nb_superkmers_thread, _mmer_lut, &k, &_minimizerSize] (int thread_id) 
                { reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, thread_id, nb_kmers_thread, nb_superkmers_thread);};
 
-               
-               pool.enqueue(r_t_s_wrapper);
-               //r_t_s_wrapper(0); // single threaded
+              
+               if (nb_threads > 1) 
+                pool.enqueue(r_t_s_wrapper);
+               else
+                r_t_s_wrapper(0); // single threaded
                
                read_packet = make_shared<vector<string>>();
                read_packet->reserve(100000);
             }
 		  });
     pool.join();
+    
+    // process the last block
+    reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, 0, nb_kmers_thread, nb_superkmers_thread);
 
     for (int i = 0; i < nb_threads; i++)
     { nb_kmers += nb_kmers_thread[i] ; nb_superkmers += nb_superkmers_thread[i];}
