@@ -226,12 +226,17 @@ main(int argc, char** argv)
     if (argc < 2)
         return 1;
 
-    int nb_threads=6;
+    int nb_threads = 6;
+
+    if (argc == 3)
+        nb_threads = atoi(argv[2]);
+
     int _minimizerSize = 10;
     int k = 25;
 
     ThreadPool pool(nb_threads);
     shared_ptr<vector<string>> read_packet = make_shared<vector<string>>();
+    read_packet->reserve(100000);
     vector<unsigned int> nb_kmers_thread(nb_threads), nb_superkmers_thread(nb_threads);
     uint64_t nb_kmers = 0, nb_superkmers = 0;
     uint32_t nbminims_total = (1 << (2*_minimizerSize));
@@ -256,6 +261,7 @@ main(int argc, char** argv)
                //r_t_s_wrapper(0); // single threaded
                
                read_packet = make_shared<vector<string>>();
+               read_packet->reserve(100000);
             }
 		  });
     pool.join();
