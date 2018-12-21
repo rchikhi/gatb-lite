@@ -30,12 +30,12 @@ using namespace std;
 typedef vector<shared_ptr<vector<string>>> read_packets_t ;
 typedef uint64_t kmer_type;
 
-inline char char_to_nt(char c)
+inline static char char_to_nt(char c)
 {
     return (c>>1) & 3;
 }
 
-inline char char_to_nt_rc(char c)
+inline static char char_to_nt_rc(char c)
 {
     return ((c>>1)^2) & 3;
 }
@@ -100,9 +100,9 @@ void compute_minimizer(uint64_t kmer, uint32_t &minimizer, unsigned int& minimiz
     minimizer = 0;
     uint32_t mmer;
     uint32_t  mmerMask  = (1 << (2*_minimizerSize)) - 1;
-    for (size_t i=0; i<k; ++i)
+    for (size_t i=0; i<k-_minimizerSize+1; ++i)
     {
-        mmer    = _mmer_lut[kmer & mmerMask];
+        mmer    = _mmer_lut[(kmer >>i)& mmerMask];
         if (mmer < minimizer)
         {
             minimizer = mmer;
@@ -119,6 +119,8 @@ void chop_read_into_kmers(string& read, std::atomic<unsigned int> &nb_kmers, vec
     unsigned int minimizer_position;
     uint32_t minimizer, mmer;
 
+    // TODO skip kmers contaning N's, for now theyre transformed into G's
+    
     for (size_t i=0; i<k; ++i)
     {
         char c  = char_to_nt(read[i]);
@@ -140,11 +142,14 @@ void chop_read_into_kmers(string& read, std::atomic<unsigned int> &nb_kmers, vec
 
         mmer    = _mmer_lut[kmer & mmerMask];
         minimizer_position--;
-        if (mmer < minimizer)
+        if (mmer <= minimizer)
         {
-            minimizer = mmer;
-            minimizer_position = k-_minimizerSize+1;
-            superkmer_positions.push_back(i);
+            if (mmer != minimizer) 
+            {
+                superkmer_positions.push_back(i);
+                minimizer = mmer;
+            }
+            minimizer_position = i-_minimizerSize+1;
         }
         else
         {
@@ -243,7 +248,7 @@ main(int argc, char** argv)
             string&& read_str = string(rec.sequence().begin(),rec.sequence().end());
             read_packet->push_back(std::move(read_str));
 
-            if (read_packet->size() == 100)
+            if (read_packet->size() == 10000)
             {
                auto r_t_s_wrapper = [&read_packets, &lock, &nb_kmers, &nb_superkmers, &_mmer_lut, k, _minimizerSize] (int thread_id) 
                { reads_to_superkmer(read_packets, nb_kmers, nb_superkmers, _mmer_lut, k, _minimizerSize, lock, thread_id);};
@@ -254,8 +259,8 @@ main(int argc, char** argv)
 
                read_packet = make_shared<vector<string>>();
                
-               //pool.enqueue(r_t_s_wrapper);
-               r_t_s_wrapper(0); // single threaded
+               pool.enqueue(r_t_s_wrapper);
+               //r_t_s_wrapper(0); // single threaded
             }
 		  });
     pool.join();
