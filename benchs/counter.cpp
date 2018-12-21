@@ -42,8 +42,13 @@ main(int argc, char** argv)
 {
     if (argc < 2)
         return 1;
-    process_fastq(argv[1], [](fastq_record<>& rec) { 
+    size_t count = 0;
+    process_fastq(argv[1], [&](fastq_record<>& rec) { 
 		    use(rec);
 		    clobber();
+            count++;
 		  });
+
+    std::cout << count << std::endl;
+    return 0;
 }
