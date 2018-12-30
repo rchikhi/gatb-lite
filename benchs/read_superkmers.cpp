@@ -232,23 +232,27 @@ main(int argc, char** argv)
             while ((!thread_over[thread_id]) || (position_index < nb_read_positions[thread_id]))
             {
                 while ((position_index >= nb_read_positions[thread_id]) && (!thread_over[thread_id])) { 
-                    //std::cout << "waiting " << nb_read_positions[thread_id] << std::endl;
                     if (thread_caught_up[thread_id] == false) // signal that we're going to reset read_positions and nb_read_positions
                     {
-                        if (!(position_index >= nb_read_positions[thread_id])) // maybe was a false alert (to reproduce that sort of bug: uncomment that "if" statement and set read_positions_buffer_size to 1<<11), and make sure to sleep(0.1) just before the parent "if" (not after)
+                        if (!(position_index >= nb_read_positions[thread_id])) // needed to avoid false alerts (which result in slightly 
+                                                                               // less sequences processed: to reproduce, uncomment 
+                                                                               // that "if" statement and set read_positions_buffer_size 
+                                                                               // to 1<<11), and make sure to sleep(0.1) just before the 
+                                                                               // parent "if" (not after)
                             break;
                         read_positions[thread_id].clear();
                         nb_read_positions[thread_id] = 0;
                         position_index = 0;
                         thread_caught_up[thread_id] = true;
                     }
-                    sleep(0.1); // Note: code hangs forever if 1) that sleep() is missing and 2) the read_to_superkmer function below is commented out; maybe because then the loop is polling nb_read_positions[thread_id] all the time, making the main thread much slower to update it? (some sort of false sharing)
+                    sleep(0.1);   // FIXME: code loops forever if that sleep() is missing; would love to figure out why; to reproduce: 
+                                  // comment that line and do benchs/read_superkmers benchs/frag_1.fastq.20klines  3
                     continue;
                 } // waiting on IO, shouldn't happen so often
-                
+                if (position_index >= nb_read_positions[thread_id]) // avoid case when thread is over but position_index is already too high
+                    continue;
                 const char* read_start = read_positions[thread_id][position_index];
                 const char* read_end = read_positions[thread_id][position_index+1];
-                //if (position_index % 10000 == 0) std::cout << "got read at pos: " << position_index << " ptrs: " << std::to_string(uint64_t(read_start)) << " " << std::to_string(uint64_t(read_end)) << std::endl;
                 position_index += 2;
                 read_to_superkmer(read_start, read_end, _mmer_lut, k, _minimizerSize,  nb_kmers_thread, nb_superkmers_thread);
             }
@@ -267,7 +271,6 @@ main(int argc, char** argv)
             int thread_id = nb_reads % nb_threads;
             read_positions[thread_id].push_back(rec.sequence().begin());
             read_positions[thread_id].push_back(rec.sequence().end());
-            //std::cout << "processing read " << nb_reads << " " <<  std::to_string(uint64_t(rec.sequence().begin())) << " " << std::to_string(uint64_t(rec.sequence().end())) << std::endl;
             nb_reads ++;
             nb_read_positions[thread_id] += 2;
 
