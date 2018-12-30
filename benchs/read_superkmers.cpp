@@ -6,8 +6,6 @@
 #include "gatbl/sys/file.hpp"
 #include "gatbl/fastx.hpp"
 
-#include "ThreadPool.h"
-//#include "thread_pool.hpp" // other thread pool we're not using
 
 using namespace gatbl;
 
