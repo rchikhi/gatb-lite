@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cstring>
 #include <thread>
+#include <algorithm>
 
 #include "gatbl/sys/file.hpp"
 #include "gatbl/fastx.hpp"
@@ -215,21 +216,33 @@ main(int argc, char** argv)
     vector<uint64_t> nb_read_positions(nb_threads);
     vector<std::thread> threads;
     vector<bool> thread_over(nb_threads);
+    vector<bool> thread_caught_up(nb_threads);
+    const uint64_t read_positions_buffer_size = (1<<26); // process 70M reads/thread at a time (memory usage of 140MB/thread to remember parsed read positions)
 
     for (int thread_id = 0; thread_id < nb_threads; thread_id++)
     { 
         thread_over[thread_id] = false;
-        read_positions[thread_id].reserve(300000000);//  FIXME this vector cannot resize during multithreaded mode
+        thread_caught_up[thread_id] = true;
+        read_positions[thread_id].reserve(read_positions_buffer_size);
         nb_read_positions[thread_id] = 0;
 
-        auto thread_func = [&thread_over, nb_threads, thread_id, &read_positions, &nb_read_positions, &nb_kmers_threads, &nb_superkmers_threads, &_mmer_lut, &k, &_minimizerSize]()
+        auto thread_func = [&thread_over, &thread_caught_up, read_positions_buffer_size, nb_threads, thread_id, &read_positions, &nb_read_positions, &nb_kmers_threads, &nb_superkmers_threads, &_mmer_lut, &k, &_minimizerSize]()
         {
             uint64_t position_index = 0, nb_kmers_thread = 0, nb_superkmers_thread = 0;
             while ((!thread_over[thread_id]) || (position_index < nb_read_positions[thread_id]))
             {
                 while ((position_index >= nb_read_positions[thread_id]) && (!thread_over[thread_id])) { 
                     //std::cout << "waiting " << nb_read_positions[thread_id] << std::endl;
-                    sleep(1);
+                    if (thread_caught_up[thread_id] == false) // signal that we're going to reset read_positions and nb_read_positions
+                    {
+                        if (!(position_index >= nb_read_positions[thread_id])) // maybe was a false alert (to reproduce that sort of bug: uncomment that "if" statement and set read_positions_buffer_size to 1<<11), and make sure to sleep(0.1) just before the parent "if" (not after)
+                            break;
+                        read_positions[thread_id].clear();
+                        nb_read_positions[thread_id] = 0;
+                        position_index = 0;
+                        thread_caught_up[thread_id] = true;
+                    }
+                    sleep(0.1); // Note: code hangs forever if 1) that sleep() is missing and 2) the read_to_superkmer function below is commented out; maybe because then the loop is polling nb_read_positions[thread_id] all the time, making the main thread much slower to update it? (some sort of false sharing)
                     continue;
                 } // waiting on IO, shouldn't happen so often
                 
@@ -238,7 +251,6 @@ main(int argc, char** argv)
                 //if (position_index % 10000 == 0) std::cout << "got read at pos: " << position_index << " ptrs: " << std::to_string(uint64_t(read_start)) << " " << std::to_string(uint64_t(read_end)) << std::endl;
                 position_index += 2;
                 read_to_superkmer(read_start, read_end, _mmer_lut, k, _minimizerSize,  nb_kmers_thread, nb_superkmers_thread);
-                //std::cout << "done proc read" << std::endl;
             }
 
             // eliminates false sharing instead of incrementing nb_kmers_threads online
@@ -250,7 +262,7 @@ main(int argc, char** argv)
         threads.push_back(std::thread(thread_func));
     }
 
-    process_fastq(argv[1], [nb_threads, &nb_reads, &nb_read_positions, &read_positions](fastq_record<>& rec) { 
+    process_fastq(argv[1], [nb_threads, &nb_reads, &nb_read_positions, &read_positions, &thread_caught_up](fastq_record<>& rec) { 
 
             int thread_id = nb_reads % nb_threads;
             read_positions[thread_id].push_back(rec.sequence().begin());
@@ -258,7 +270,18 @@ main(int argc, char** argv)
             //std::cout << "processing read " << nb_reads << " " <<  std::to_string(uint64_t(rec.sequence().begin())) << " " << std::to_string(uint64_t(rec.sequence().end())) << std::endl;
             nb_reads ++;
             nb_read_positions[thread_id] += 2;
-            
+
+            // when one of the threads' buffer of read positions is about to overflow
+            if (unlikely((nb_read_positions[thread_id] > 0) && (nb_read_positions[thread_id] % read_positions_buffer_size == 0)))
+            {
+                // signal to the threads that they need to catch up
+                std::fill(thread_caught_up.begin(), thread_caught_up.end(), false);
+                // wait for all threads to have caught up
+                while (! std::all_of(thread_caught_up.begin(), thread_caught_up.end(), [](bool v) { return v; }))
+                {
+                    continue;
+                }
+            }
     });
     std::cout << "done parsing fastq" << std::endl;
    
