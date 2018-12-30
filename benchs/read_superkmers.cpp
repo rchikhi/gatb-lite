@@ -27,8 +27,6 @@ process_fastq(std::string filename, F&& callback)
 
 using namespace std;
 
-typedef shared_ptr<vector<string>> read_packet_t ;
-typedef vector<read_packet_t> read_packets_t ;
 typedef uint64_t kmer_type;
 
 inline static char char_to_nt(char c)
@@ -96,7 +94,7 @@ void init_minimizers(int _minimizerSize, vector<uint32_t> &_mmer_lut)
     }
 }
 
-void compute_minimizer(uint64_t kmer, uint32_t &minimizer, unsigned int& minimizer_position, unsigned int k, vector<uint32_t> &_mmer_lut, unsigned int _minimizerSize)
+void compute_minimizer(uint64_t kmer, uint32_t &minimizer, unsigned int& minimizer_position, unsigned int k, const vector<uint32_t> &_mmer_lut, unsigned int _minimizerSize)
 {
     minimizer = 0;
     uint32_t mmer;
@@ -112,112 +110,86 @@ void compute_minimizer(uint64_t kmer, uint32_t &minimizer, unsigned int& minimiz
     }
 }
 
-void chop_read_into_kmers(string& read, vector<uint32_t> &_mmer_lut, unsigned int k, unsigned int _minimizerSize, vector<int> &superkmer_positions, vector<unsigned int> &nb_kmers_thread, int thread_id)
+void read_to_superkmer(const char* read_start, const char* read_end,
+        const vector<uint32_t> &_mmer_lut, unsigned int k, unsigned int _minimizerSize, 
+        uint64_t &nb_kmers_thread, uint64_t &nb_superkmers_thread)
 {
     kmer_type kmer = 0, kmer_rc = 0;
     kmer_type kmerMask = (1LL << (k*2)) - 1;
     uint32_t  mmerMask  = (1 << (2*_minimizerSize)) - 1;
     unsigned int minimizer_position;
     uint32_t minimizer, mmer;
-
-    // TODO skip kmers contaning N's, for now theyre transformed into G's
-    
-    for (size_t i=0; i<k; ++i)
-    {
-        char c  = char_to_nt(read[i]);
-        kmer    = (kmer<<2) + c;
-        kmer_rc = (kmer>>2) + (c^2);
-    }
-    emit_kmer(std::min(kmer,kmer_rc));
-    nb_kmers_thread[thread_id]++;
-    compute_minimizer(kmer, minimizer, minimizer_position, k, _mmer_lut, _minimizerSize);
-
-    size_t read_size = read.size();
-    for (size_t i = k; i < read_size; i++)
-    {
-        char c  = char_to_nt(read[i]);
-        kmer    = (( kmer << 2) +  c) & kmerMask;
-        kmer_rc = (( kmer >> 2) +  (c^2)) & kmerMask;
-        emit_kmer(std::min(kmer,kmer_rc));
-        nb_kmers_thread[thread_id]++;
-
-        mmer    = _mmer_lut[kmer & mmerMask];
-        minimizer_position--;
-        if (mmer <= minimizer)
-        {
-            if (mmer != minimizer) 
-            {
-                superkmer_positions.push_back(i);
-                minimizer = mmer;
-            }
-            minimizer_position = i-_minimizerSize+1;
-        }
-        else
-        {
-            if (minimizer_position < 0)
-            {
-                uint32_t old_minimizer = minimizer;
-                compute_minimizer(kmer, minimizer, minimizer_position, k, _mmer_lut, _minimizerSize);
-                if (minimizer != old_minimizer)
-                    superkmer_positions.push_back(i);
-            }
-        }
-    }
-}
-
-void emit_superkmers(string &read, vector<int> &superkmer_positions, int k, vector<unsigned int> &nb_superkmers_thread, int thread_id)
-{
-    // do what we want with that kmer
-    //std::cout << kmer << std::endl;
-    
-    size_t read_size = read.size();
     string superkmer = "";
-    unsigned int next_break_i = 0;
-    unsigned int next_break;
-    if (superkmer_positions.size() == 0)
-       next_break = read.size()+1;
-    else
-       next_break = superkmer_positions[next_break_i];
     uint64_t last_kmer = 0;
-    kmer_type kmerMask = (1LL << (k*2)) - 1;
 
-    for (size_t i = 0; i < read_size; i++)
+    size_t buffer_index = 0;
+    size_t readlen = read_end - read_start;
+    while (buffer_index < readlen-k+1)
     {
-        char c  = char_to_nt(read[i]);
-        last_kmer    = ((last_kmer<<2) + c ) & kmerMask;
-        superkmer += c;
-
-        if (i == next_break)
+        bool found_N = false;
+        // prime the first kmer
+        for (size_t i=buffer_index; i<buffer_index+k; ++i)
         {
-            use(superkmer); // emit the superkmer here
-            nb_superkmers_thread[thread_id]++;
-
-            next_break_i++;
-            next_break = superkmer_positions[next_break_i];
-            superkmer = last_kmer; // it works?! TODO check
+            if (unlikely(read_start[i] == 'N')) {found_N = true; buffer_index = i+1; break;}
+            unsigned char c  = char_to_nt(read_start[i]);
+            kmer    = (kmer<<2) + c;
+            kmer_rc = (kmer>>2) + (c^2);
         }
+        if (unlikely(found_N)) continue;
+
+        emit_kmer(std::min(kmer,kmer_rc));
+        nb_kmers_thread++;
+        compute_minimizer(kmer, minimizer, minimizer_position, k, _mmer_lut, _minimizerSize);
+
+        buffer_index++;
+
+        // iterate next kmers of that read
+        while (buffer_index < readlen-k+1)
+        {
+            size_t i = buffer_index+k;
+            if (unlikely(read_start[i] == 'N')) { buffer_index = i+1; break;} // no need to set found_N here, we'll continue 
+            unsigned char c  = char_to_nt(read_start[i]);
+            kmer    = (( kmer << 2) +  c) & kmerMask;
+            kmer_rc = (( kmer >> 2) +  (c^2)) & kmerMask;
+            superkmer += c;
+            emit_kmer(std::min(kmer,kmer_rc));
+            nb_kmers_thread++;
+
+            mmer    = _mmer_lut[kmer & mmerMask];
+            minimizer_position--;
+            if (mmer <= minimizer)
+            {
+                if (mmer != minimizer) 
+                {
+                    use(superkmer); // emit the superkmer here
+                    nb_superkmers_thread++;
+                    minimizer = mmer;
+                    superkmer = last_kmer; // it works?! TODO check
+                }
+                minimizer_position = i-_minimizerSize+1;
+            }
+            else
+            {
+                if (minimizer_position < 0)
+                {
+                    uint32_t old_minimizer = minimizer;
+                    compute_minimizer(kmer, minimizer, minimizer_position, k, _mmer_lut, _minimizerSize);
+                    if (minimizer != old_minimizer)
+                    {
+                        use(superkmer); // emit the superkmer here
+                        nb_superkmers_thread++;
+                        superkmer = last_kmer; // it works?! TODO check
+                    }
+                }
+            }
+            last_kmer = ((last_kmer<<2) + c ) & kmerMask;
+            buffer_index++;
+        }
+
     }
-    
+
     use(superkmer); // emit the last superkmer
-    nb_superkmers_thread[thread_id]++;
-}
-
-
-void reads_to_superkmer(read_packet_t read_packet, 
-        vector<uint32_t> _mmer_lut, unsigned int k, unsigned int _minimizerSize, int thread_id,
-        vector<unsigned int> &nb_kmers_thread, vector<unsigned int> &nb_superkmers_thread)
-{
-    for (auto read: *read_packet)
-    {
-        if (read.size() < k) continue;
-
-        //std::cout << read << std::endl;
-        vector<int> superkmer_positions;
-        chop_read_into_kmers(read, _mmer_lut, k, _minimizerSize, superkmer_positions, nb_kmers_thread, thread_id);
-        emit_superkmers(read, superkmer_positions, k, nb_superkmers_thread, thread_id);
-    }
-    
-    read_packet.reset(); 
+    nb_superkmers_thread++;
 }
 
 int
@@ -231,57 +203,75 @@ main(int argc, char** argv)
     if (argc == 3)
         nb_threads = atoi(argv[2]);
 
-    int _minimizerSize = 10;
+    int _minimizerSize = 8;
     int k = 25;
 
-    ThreadPool pool(nb_threads);
-    //tp::ThreadPool *pool(new tp::ThreadPool);
 
-    shared_ptr<vector<string>> read_packet = make_shared<vector<string>>();
-    int read_packet_size = 1000000;
-    read_packet->reserve(read_packet_size);
-    vector<unsigned int> nb_kmers_thread(nb_threads), nb_superkmers_thread(nb_threads);
-    uint64_t nb_kmers = 0, nb_superkmers = 0;
+    vector<vector<const char*>> read_positions(nb_threads); // fill a [for now non-circular] buffer of read position, written by the IO thread and read by the worker threads
+    vector<unsigned int> nb_kmers_threads(nb_threads), nb_superkmers_threads(nb_threads);
     uint32_t nbminims_total = (1 << (2*_minimizerSize));
     vector<uint32_t> _mmer_lut(nbminims_total); 
     init_minimizers(_minimizerSize, _mmer_lut);
+    uint64_t nb_reads = 0;
+    vector<uint64_t> nb_read_positions(nb_threads);
+    vector<std::thread> threads;
+    vector<bool> thread_over(nb_threads);
 
-    for (int i = 0; i < nb_threads; i++)
-    { nb_kmers_thread[i] = 0; nb_superkmers_thread[i] = 0;}
+    for (int thread_id = 0; thread_id < nb_threads; thread_id++)
+    { 
+        thread_over[thread_id] = false;
+        read_positions[thread_id].reserve(300000000);//  FIXME this vector cannot resize during multithreaded mode
+        nb_read_positions[thread_id] = 0;
 
-    process_fastq(argv[1], [&read_packet, &read_packet_size, &pool, &nb_kmers_thread, &nb_superkmers_thread, &_mmer_lut, &k, &_minimizerSize, &nb_threads](fastq_record<>& rec) { 
-
-            string&& read_str = string(rec.sequence().begin(),rec.sequence().end());
-            read_packet->push_back(std::move(read_str));
-
-            if (read_packet->size() == read_packet_size)
+        auto thread_func = [&thread_over, nb_threads, thread_id, &read_positions, &nb_read_positions, &nb_kmers_threads, &nb_superkmers_threads, &_mmer_lut, &k, &_minimizerSize]()
+        {
+            uint64_t position_index = 0, nb_kmers_thread = 0, nb_superkmers_thread = 0;
+            while ((!thread_over[thread_id]) || (position_index < nb_read_positions[thread_id]))
             {
-               auto r_t_s_wrapper = [read_packet, &nb_kmers_thread, &nb_superkmers_thread, _mmer_lut, &k, &_minimizerSize] (int thread_id) 
-               { reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, thread_id, nb_kmers_thread, nb_superkmers_thread);};
-
-               auto r_t_s_wrapper_4_other_thread_pool= [read_packet, &nb_kmers_thread, &nb_superkmers_thread, _mmer_lut, &k, &_minimizerSize] () 
-               { reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, 0, nb_kmers_thread, nb_superkmers_thread);};
-              
-               if (nb_threads > 1)
-               {
-                pool.enqueue(r_t_s_wrapper);
-                //pool->post(r_t_s_wrapper_4_other_thread_pool);
-               }
-               else
-                r_t_s_wrapper(0); // single threaded
-               
-               read_packet = make_shared<vector<string>>();
-               read_packet->reserve(read_packet_size);
+                while ((position_index >= nb_read_positions[thread_id]) && (!thread_over[thread_id])) { 
+                    //std::cout << "waiting " << nb_read_positions[thread_id] << std::endl;
+                    sleep(1);
+                    continue;
+                } // waiting on IO, shouldn't happen so often
+                
+                const char* read_start = read_positions[thread_id][position_index];
+                const char* read_end = read_positions[thread_id][position_index+1];
+                //if (position_index % 10000 == 0) std::cout << "got read at pos: " << position_index << " ptrs: " << std::to_string(uint64_t(read_start)) << " " << std::to_string(uint64_t(read_end)) << std::endl;
+                position_index += 2;
+                read_to_superkmer(read_start, read_end, _mmer_lut, k, _minimizerSize,  nb_kmers_thread, nb_superkmers_thread);
+                //std::cout << "done proc read" << std::endl;
             }
-		  });
-    pool.join();
-    //delete pool;
-    
-    // process the last block
-    reads_to_superkmer(read_packet, _mmer_lut, k, _minimizerSize, 0, nb_kmers_thread, nb_superkmers_thread);
 
+            // eliminates false sharing instead of incrementing nb_kmers_threads online
+            nb_kmers_threads[thread_id] = nb_kmers_thread;
+            nb_superkmers_threads[thread_id] = nb_superkmers_thread;
+        };
+
+        // spawn thread
+        threads.push_back(std::thread(thread_func));
+    }
+
+    process_fastq(argv[1], [nb_threads, &nb_reads, &nb_read_positions, &read_positions](fastq_record<>& rec) { 
+
+            int thread_id = nb_reads % nb_threads;
+            read_positions[thread_id].push_back(rec.sequence().begin());
+            read_positions[thread_id].push_back(rec.sequence().end());
+            //std::cout << "processing read " << nb_reads << " " <<  std::to_string(uint64_t(rec.sequence().begin())) << " " << std::to_string(uint64_t(rec.sequence().end())) << std::endl;
+            nb_reads ++;
+            nb_read_positions[thread_id] += 2;
+            
+    });
+    std::cout << "done parsing fastq" << std::endl;
+   
     for (int i = 0; i < nb_threads; i++)
-    { nb_kmers += nb_kmers_thread[i] ; nb_superkmers += nb_superkmers_thread[i];}
+        thread_over[i] = true;
+    
+    uint64_t nb_kmers = 0, nb_superkmers = 0;
+    for (int i = 0; i < nb_threads; i++)
+    {
+        threads[i].join();
+        nb_kmers += nb_kmers_threads[i] ; nb_superkmers += nb_superkmers_threads[i];
+    }
 
     std::cout << "nb kmers:      " << nb_kmers      << std::endl;
     std::cout << "nb superkmers: " << nb_superkmers << std::endl;
