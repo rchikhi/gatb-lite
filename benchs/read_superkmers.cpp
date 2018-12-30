@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <iostream>
 #include <cstring>
+#include <thread>
 
 #include "gatbl/sys/file.hpp"
 #include "gatbl/fastx.hpp"
