@@ -2,7 +2,7 @@
 #define FASTX_HPP
 
 #include "gatbl/utils/interator_pair.hpp"
-#include "gatbl/utils/precondition_check.hpp"
+#include "gatbl/utils/condition_check.hpp"
 
 namespace gatbl {
 
@@ -14,7 +14,7 @@ struct parse_error : std::runtime_error
 };
 
 template<typename Record>
-struct sequence_iterator : private utils::precondition_check<>
+struct sequence_iterator : private utils::condition_check<>
 {
     using char_iterator = typename Record::char_iterator;
     using range = iterator_pair<char_iterator>;
@@ -50,7 +50,7 @@ struct sequence_iterator : private utils::precondition_check<>
     bool operator<(char_iterator& end) const
     {
         bool parseok = _record.parse(end);
-        precondition_check::set(parseok);
+        condition_check::set(parseok);
         return parseok;
     }
 
@@ -58,15 +58,15 @@ struct sequence_iterator : private utils::precondition_check<>
 
     sequence_iterator& operator++()
     {
-        precondition_check::check();
-        precondition_check::unchecked();
+        condition_check::check();
+        condition_check::unchecked();
         _record.next();
         return *this;
     }
 
     value_type& operator*()
     {
-        precondition_check::check();
+        condition_check::check();
         return _record;
     }
 
@@ -139,13 +139,13 @@ class fasta_record
 
     const substring_t header() const
     {
-        assume(*this);
+        assume(*this, "empty fasta record");
         return { _data + 1 /* HeaderChar */, _sequence_header_end };
     }
 
     const substring_t sequence() const
     {
-        assume(*this);
+        assume(*this, "empty fasta record");
         return { _sequence_header_end + 1 /* "\n" */, _sequence_end };
     }
 
@@ -173,7 +173,7 @@ class fasta_record
 
     void set_error(const char* e) noexcept
     {
-        assume(error == nullptr);
+        assume(error == nullptr, "no error set");
         error = e;
     }
 
@@ -188,7 +188,7 @@ class fasta_record
     /// Returns an iterator to the last parsed char
     char_iterator _parse(const char_iterator& end)
     {
-        assume(_data);
+        assume(_data && _data <= end, "no input data");
         const char* p = begin();
 
         // Sequence header
@@ -200,7 +200,7 @@ class fasta_record
         }
         const char* newline = find(p, end, '\n');
         _sequence_header_end = newline;
-        assert(!contains(p, newline, '\n'));
+        assert(!contains(p, newline, '\n'), "newline found in header");
 
         // Sequence
         p = newline + 1; // skip "\n"
@@ -212,7 +212,7 @@ class fasta_record
         }
         newline = find(p, end, '\n');
         _sequence_end = newline;
-        assert(!contains(p, newline, '\n'));
+        assert(!contains(p, newline, '\n'), "newline found in sequence");
 
         return newline;
     }
@@ -233,7 +233,7 @@ class fastq_record : public fasta_record<CharIt, '@'>
     using typename base::char_iterator;
     using typename base::substring_t;
 
-    const substring_t quality() const { return { _quality_header_end + 1, _quality_header_end + 1 + this->sequence().size() }; }
+    const substring_t quality() const { return { _quality_start, _quality_start + this->sequence().size() }; }
 
     char_iterator end() const { return quality().end(); }
 
@@ -248,7 +248,7 @@ class fastq_record : public fasta_record<CharIt, '@'>
 
         this->_sequence_header_end = this->begin();
         this->_sequence_end = this->begin();
-        this->_quality_header_end = this->begin();
+        this->_quality_start = this->begin();
         base::throw_parse_error();
         return false;
     }
@@ -271,21 +271,26 @@ class fastq_record : public fasta_record<CharIt, '@'>
             return end;
         }
         char_iterator newline = find(p, end, '\n'); //, initialized ? p + _quality_header_length : p + 1);
-        _quality_header_end = newline;
-        assert(!contains(p, newline, '\n'));
+        assert(!contains(p, newline, '\n'), "newline found in quality header");
 
-        p = newline + 1 + this->sequence().size();
-        if (unlikely(p >= end))
+        // Quality follow...
+        p = newline + 1;
+        _quality_start = p;
+
+        // Checks for the newline after quality
+        newline = p + this->sequence().size();
+        if (unlikely(newline >= end))
             return end;
-        if (unlikely(*p != '\n')) {
+        if (unlikely(*newline != '\n')) {
             base::set_error("Expected newline after quality");
             return end;
         }
+        assert(!contains(p, newline, '\n'), "newline found in quality");
 
-        return p;
+        return newline;
     }
 
-    char_iterator _quality_header_end = {};
+    char_iterator _quality_start = {};
 };
 
 }
